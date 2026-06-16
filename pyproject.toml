@@ -1,0 +1,37 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "packetscrubber"
+version = "0.1.0"
+description = "Cross-platform GUI for anonymizing PCAP and PCAPNG files."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "PySide6>=6.7",
+    "scapy>=2.5",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8",
+    "ruff>=0.5",
+]
+
+[project.scripts]
+packetscrubber = "packetscrubber.gui:main"
+packetscrubber-cli = "packetscrubber.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-dir]
+"" = "src"
+
+[tool.setuptools.package-data]
+packetscrubber = ["assets/*"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
