@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import ctypes
+import os
 from dataclasses import dataclass, field
 from enum import Enum
 from ipaddress import ip_address
@@ -36,6 +38,7 @@ class ScrubOptions:
     mac_map: dict[str, str] = field(default_factory=dict)
     port_map: dict[int, int] = field(default_factory=dict)
     output_pcapng: bool = False
+    min_free_memory_mb: int = 512
 
 
 @dataclass
@@ -61,6 +64,10 @@ class CaptureSummary:
     raw_payload_packets: int
 
 
+class MemorySafetyError(RuntimeError):
+    """Raised when continuing would leave too little available system memory."""
+
+
 def summarize_capture(path: str | Path, limit: int | None = None) -> CaptureSummary:
     scapy = _load_scapy()
     Ether = scapy["Ether"]
@@ -69,17 +76,19 @@ def summarize_capture(path: str | Path, limit: int | None = None) -> CaptureSumm
     Raw = scapy["Raw"]
     TCP = scapy["TCP"]
     UDP = scapy["UDP"]
-    rdpcap = scapy["rdpcap"]
 
-    packets = rdpcap(str(path), count=limit or -1)
     ipv4: set[str] = set()
     ipv6: set[str] = set()
     macs: set[str] = set()
     tcp_ports: set[int] = set()
     udp_ports: set[int] = set()
     raw_payload_packets = 0
+    packet_count = 0
 
-    for pkt in packets:
+    for pkt in _iter_packets(path, scapy=scapy):
+        if packet_count % 1024 == 0:
+            _raise_if_memory_low()
+        packet_count += 1
         if Ether in pkt:
             macs.update([pkt[Ether].src.lower(), pkt[Ether].dst.lower()])
         if IP in pkt:
@@ -92,9 +101,11 @@ def summarize_capture(path: str | Path, limit: int | None = None) -> CaptureSumm
             udp_ports.update([int(pkt[UDP].sport), int(pkt[UDP].dport)])
         if Raw in pkt:
             raw_payload_packets += 1
+        if limit is not None and packet_count >= limit:
+            break
 
     return CaptureSummary(
-        packet_count=len(packets),
+        packet_count=packet_count,
         ipv4_addresses=sorted(ipv4),
         ipv6_addresses=sorted(ipv6),
         mac_addresses=sorted(macs),
@@ -106,28 +117,29 @@ def summarize_capture(path: str | Path, limit: int | None = None) -> CaptureSumm
 
 def scrub_capture(input_path: str | Path, output_path: str | Path, options: ScrubOptions) -> ScrubReport:
     scapy = _load_scapy()
+    PcapWriter = scapy["PcapWriter"]
     PcapNgWriter = scapy["PcapNgWriter"]
-    rdpcap = scapy["rdpcap"]
-    wrpcap = scapy["wrpcap"]
 
-    packets = rdpcap(str(input_path))
-    report = ScrubReport(packets_read=len(packets))
+    _raise_if_memory_low(options.min_free_memory_mb)
+    report = ScrubReport()
     mapper = DeterministicMapper(options)
-
-    for pkt in packets:
-        scrub_packet(pkt, options, mapper, report, scapy=scapy)
-
+    writer: Any
     if options.output_pcapng or str(output_path).lower().endswith(".pcapng"):
         writer = PcapNgWriter(str(output_path))
-        try:
-            for pkt in packets:
-                writer.write(pkt)
-        finally:
-            writer.close()
     else:
-        wrpcap(str(output_path), packets)
+        writer = PcapWriter(str(output_path), sync=True)
 
-    report.packets_written = len(packets)
+    try:
+        for pkt in _iter_packets(input_path, scapy=scapy):
+            if report.packets_read % 1024 == 0:
+                _raise_if_memory_low(options.min_free_memory_mb)
+            report.packets_read += 1
+            scrub_packet(pkt, options, mapper, report, scapy=scapy)
+            writer.write(pkt)
+            report.packets_written += 1
+    finally:
+        writer.close()
+
     return report
 
 
@@ -305,7 +317,7 @@ def _load_scapy() -> dict[str, Any]:
     from scapy.layers.inet6 import IPv6
     from scapy.layers.l2 import Ether
     from scapy.packet import Raw
-    from scapy.utils import PcapNgWriter, rdpcap, wrpcap
+    from scapy.utils import PcapNgWriter, PcapReader, PcapWriter
 
     return {
         "Ether": Ether,
@@ -313,12 +325,71 @@ def _load_scapy() -> dict[str, Any]:
         "IP": IP,
         "IPv6": IPv6,
         "PcapNgWriter": PcapNgWriter,
+        "PcapReader": PcapReader,
+        "PcapWriter": PcapWriter,
         "Raw": Raw,
         "TCP": TCP,
         "UDP": UDP,
-        "rdpcap": rdpcap,
-        "wrpcap": wrpcap,
     }
+
+
+def _iter_packets(path: str | Path, scapy: dict[str, Any] | None = None) -> Iterable[Any]:
+    PcapReader = (scapy or _load_scapy())["PcapReader"]
+    reader = PcapReader(str(path))
+    try:
+        yield from reader
+    finally:
+        reader.close()
+
+
+def _raise_if_memory_low(min_free_memory_mb: int = 512) -> None:
+    min_free_memory_mb = max(0, min_free_memory_mb)
+    if min_free_memory_mb == 0:
+        return
+
+    available = _available_memory_bytes()
+    if available is None:
+        return
+
+    minimum = min_free_memory_mb * 1024 * 1024
+    if available < minimum:
+        available_mb = available // (1024 * 1024)
+        raise MemorySafetyError(
+            "Available system memory is too low to continue safely "
+            f"({available_mb} MB free; need at least {min_free_memory_mb} MB). "
+            "Close other applications or process a smaller capture chunk."
+        )
+
+
+def _available_memory_bytes() -> int | None:
+    if os.name == "nt":
+        class MemoryStatus(ctypes.Structure):
+            _fields_ = [
+                ("dwLength", ctypes.c_ulong),
+                ("dwMemoryLoad", ctypes.c_ulong),
+                ("ullTotalPhys", ctypes.c_ulonglong),
+                ("ullAvailPhys", ctypes.c_ulonglong),
+                ("ullTotalPageFile", ctypes.c_ulonglong),
+                ("ullAvailPageFile", ctypes.c_ulonglong),
+                ("ullTotalVirtual", ctypes.c_ulonglong),
+                ("ullAvailVirtual", ctypes.c_ulonglong),
+                ("ullAvailExtendedVirtual", ctypes.c_ulonglong),
+            ]
+
+        status = MemoryStatus()
+        status.dwLength = ctypes.sizeof(MemoryStatus)
+        if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status)):
+            return int(status.ullAvailPhys)
+        return None
+
+    try:
+        pages = os.sysconf("SC_AVPHYS_PAGES") if hasattr(os, "sysconf") else None
+        page_size = os.sysconf("SC_PAGE_SIZE") if hasattr(os, "sysconf") else None
+    except (OSError, ValueError):
+        return None
+    if isinstance(pages, int) and isinstance(page_size, int):
+        return pages * page_size
+    return None
 
 
 def parse_mapping_lines(lines: Iterable[str]) -> dict[str, str]:

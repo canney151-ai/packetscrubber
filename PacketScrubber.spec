@@ -7,10 +7,13 @@ block_cipher = None
 
 hiddenimports = collect_submodules("scapy")
 datas = collect_data_files("scapy")
-datas += [("src/packetscrubber/assets/signalvault-logo-white.svg", "packetscrubber/assets")]
+datas += [
+    ("src/packetscrubber/assets/signalvault-logo-white.svg", "packetscrubber/assets"),
+    ("src/packetscrubber/assets/signalvault-icon.ico", "packetscrubber/assets"),
+]
 
 a = Analysis(
-    ["src/packetscrubber/gui.py"],
+    ["pyinstaller_entry.py"],
     pathex=["src"],
     binaries=[],
     datas=datas,
@@ -46,4 +49,5 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
+    icon="src/packetscrubber/assets/signalvault-icon.ico",
 )

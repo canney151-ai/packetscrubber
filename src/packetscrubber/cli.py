@@ -33,6 +33,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--mac-map", action="append", default=[], metavar="OLD=NEW")
     parser.add_argument("--port-map", action="append", default=[], metavar="OLD=NEW")
     parser.add_argument("--pcapng", action="store_true", help="Write PCAPNG output.")
+    parser.add_argument(
+        "--min-free-memory-mb",
+        type=int,
+        default=512,
+        help="Abort before available system memory drops below this many MB. Use 0 to disable.",
+    )
     return parser
 
 
@@ -51,6 +57,7 @@ def main(argv: list[str] | None = None) -> int:
         mac_map=parse_mapping_lines(args.mac_map),
         port_map=parse_port_mapping_lines(args.port_map),
         output_pcapng=args.pcapng or args.output.suffix.lower() == ".pcapng",
+        min_free_memory_mb=args.min_free_memory_mb,
     )
 
     report = scrub_capture(args.input, args.output, options)

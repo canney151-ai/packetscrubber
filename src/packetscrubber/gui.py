@@ -5,7 +5,7 @@ from importlib.resources import as_file, files
 from pathlib import Path
 
 from PySide6.QtCore import Qt, QThread, Signal
-from PySide6.QtGui import QPixmap
+from PySide6.QtGui import QIcon, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -28,17 +28,31 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from .scrubber import (
-    AddressMode,
-    CaptureSummary,
-    PayloadMode,
-    PortMode,
-    ScrubOptions,
-    parse_mapping_lines,
-    parse_port_mapping_lines,
-    scrub_capture,
-    summarize_capture,
-)
+if __package__ in {None, ""}:
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    from packetscrubber.scrubber import (
+        AddressMode,
+        CaptureSummary,
+        PayloadMode,
+        PortMode,
+        ScrubOptions,
+        parse_mapping_lines,
+        parse_port_mapping_lines,
+        scrub_capture,
+        summarize_capture,
+    )
+else:
+    from .scrubber import (
+        AddressMode,
+        CaptureSummary,
+        PayloadMode,
+        PortMode,
+        ScrubOptions,
+        parse_mapping_lines,
+        parse_port_mapping_lines,
+        scrub_capture,
+        summarize_capture,
+    )
 
 
 class ScrubWorker(QThread):
@@ -62,6 +76,9 @@ class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("SignalVault PacketScrubber")
+        app_icon = _load_app_icon()
+        if not app_icon.isNull():
+            self.setWindowIcon(app_icon)
         self.setMinimumSize(1120, 760)
         self.worker: ScrubWorker | None = None
 
@@ -83,6 +100,10 @@ class MainWindow(QMainWindow):
         self.port_base = QSpinBox()
         self.port_base.setRange(1024, 65535)
         self.port_base.setValue(49152)
+        self.memory_reserve = QSpinBox()
+        self.memory_reserve.setRange(0, 262_144)
+        self.memory_reserve.setValue(512)
+        self.memory_reserve.setSuffix(" MB")
 
         self.payload_combo = QComboBox()
         for label, mode in [
@@ -179,6 +200,7 @@ class MainWindow(QMainWindow):
         form.addRow(self.mac_check)
         form.addRow(self.port_check)
         form.addRow("First anonymized port", self.port_base)
+        form.addRow("Memory reserve", self.memory_reserve)
         form.addRow("Payload handling", self.payload_combo)
         form.addRow("Payload byte limit", self.payload_bytes)
         middle.addWidget(options, 1)
@@ -252,7 +274,7 @@ class MainWindow(QMainWindow):
 
     def preview(self) -> None:
         try:
-            summary = summarize_capture(self._input_path())
+            summary = summarize_capture(self._input_path(), limit=3)
         except Exception as exc:  # noqa: BLE001
             QMessageBox.critical(self, "Preview failed", str(exc))
             return
@@ -326,12 +348,13 @@ class MainWindow(QMainWindow):
             mac_map=parse_mapping_lines(self.mac_map.toPlainText().splitlines()),
             port_map=parse_port_mapping_lines(self.port_map.toPlainText().splitlines()),
             output_pcapng=self.output_pcapng.isChecked(),
+            min_free_memory_mb=self.memory_reserve.value(),
         )
 
 
 def format_summary(summary: CaptureSummary) -> str:
     return (
-        f"Packets: {summary.packet_count}\n"
+        f"Packets inspected: {summary.packet_count}\n"
         f"Raw payload packets: {summary.raw_payload_packets}\n\n"
         f"IPv4 addresses ({len(summary.ipv4_addresses)}): {', '.join(summary.ipv4_addresses[:40])}\n"
         f"IPv6 addresses ({len(summary.ipv6_addresses)}): {', '.join(summary.ipv6_addresses[:40])}\n"
@@ -348,6 +371,15 @@ def _load_logo() -> QPixmap | None:
             return QPixmap(str(logo_path))
     except Exception:  # noqa: BLE001 - logo is decorative; the app can run without it.
         return None
+
+
+def _load_app_icon() -> QIcon:
+    try:
+        icon = files("packetscrubber").joinpath("assets/signalvault-icon.ico")
+        with as_file(icon) as icon_path:
+            return QIcon(str(icon_path))
+    except Exception:  # noqa: BLE001 - fall back to the default window icon.
+        return QIcon()
 
 
 APP_STYLESHEET = """
@@ -496,6 +528,9 @@ QProgressBar::chunk {
 def main() -> int:
     app = QApplication(sys.argv)
     app.setApplicationName("PacketScrubber")
+    app_icon = _load_app_icon()
+    if not app_icon.isNull():
+        app.setWindowIcon(app_icon)
     window = MainWindow()
     window.show()
     return app.exec()
